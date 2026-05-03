@@ -1169,9 +1169,6 @@ xwg.legs=StewartPlatformLegs(LEG_PORTS)
 xwg.cmd_queue= CommandQueue(i_am_main=I_AM_MAIN)
 xwg.light=LGT_IMU_RP
 
-#print('Voltage: ', xwg.hub.battery.voltage())
-# print('MAIN!!', BROADCAST_CH, '->', OBSERVE_CH)
-
 if I_AM_MAIN:
     main_main()
 else:
