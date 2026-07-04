@@ -2,23 +2,32 @@
 # Name: xwplatform.py
 #
 # Description:
-# Software to control a X-Wing on Stewart Platform made from LEGO set 42100.
+# A Software to control a X-Wing on Stewart Platform made from LEGO set 42100.
 # Uses two technic hubs, the center hub connects to 4 motors, the joystick hub connects to
-# 3 motors.
+# 3 motors. 
 #
-# Instructions available here:
+# The platform can be controlled by the joystick, by an Xbox-controller or by another platform.
+#
+# Instructions available here: https://reb.li/m/261134
+# Video here: https://youtu.be/W_uun-rZ7w0
 #
 # To use it install Pybricks 3.6 (or above) on both hubs and run this program on both them.
+# Notice: pybricks firmware 4.0 just came out. This version was tested and it works with 
+# pybricks firmware 4.0.1. 
 # 
 # To reconfigure BLE channels check below for constants CHAN1 and CHAN2.
 #
-# Version: 1.0
+# Multiple platform control:
+# Each platform must have its own CHAN1 and CHAN2.
+# Secondary platforms must define CHAN01 and CHAN02 as CHAN1 and CHAN2 of the main platform. 
+# Main platform must keep CHAN01 and CHAN02 as None.
+#
+# Version: 1.1
 #
 # Author VascoLP: vascolp.lego@gmail.com
 #
-# Date: April 2026
+# Date: Jun 2026
 #
-
 # 
 # Hub button presses:
 #  Joystick hub:
@@ -79,12 +88,30 @@ from pybricks.geometry import Matrix, vector
 import umath as  math
 from pybricks.iodevices import XboxController
 
+#--------------------------------------------------------------------------------
+# Standalone Mode/ main platform:
+CHAN01=None 
+CHAN02=None 
 CHAN1=const(223)
 CHAN2=const(232)
 
-DEFAULT_MAX_ANGLE=5050
+# Controlled by another platform:
+# CHAN01=const(223)   # CHAN1 of the main main platform 
+# CHAN02=const(232)   # CHAN2 of the main main platform 
+# CHAN1=const(123)
+# CHAN2=const(132)
 
-sign = lambda x: math.copysign(1, x) 
+# And another controlled one:
+# CHAN01=const(223)   # CHAN1 of the main main platform 
+# CHAN02=const(232)   # CHAN2 of the main main platform 
+# CHAN1=const(124)
+# CHAN2=const(142)
+
+# You can have as many platforms as you want as long as each platform (CHAN1,CHAN2) is different from all the others.
+# The controlled platforms should have CHAN01 and CHAN02 equal to the main platform CAN1 and CHAN2.
+#--------------------------------------------------------------------------------
+
+DEFAULT_MAX_ANGLE=5050
 
 IDLE_TIMEOUT=const(300000)
 #IDLE_TIMEOUT=const(5400000) #1.5h, exibitions time
@@ -99,17 +126,19 @@ MSG_GOTO_HOME=const(4)
 MSG_LIGHT=const(5)
 MSG_DOUBLE_CLICK=const(6)
 MSG_TRIPLE_CLICK=const(7)
+MSG_TOGGLING_WINGS=const(8)
 
-# msgs_by_name={ # debug only
-#     MSG_ALIVE: 'MSG_ALIVE',
-#     MGS_GOTO_SLICE_INFO: 'MGS_GOTO_SLICE_INFO',
-#     MSG_TOGGLE_WINGS: 'MSG_TOGGLE_WINGS',
-#     MSG_EXIT: 'MSG_EXIT',
-#     MSG_GOTO_HOME: 'MSG_GOTO_HOME',
-#     MSG_LIGHT: 'MSG_LIGHT',
-#     MSG_DOUBLE_CLICK: 'MSG_DOUBLE_CLICK',
-#     MSG_TRIPLE_CLICK: 'MSG_TRIPLE_CLICK',
-# }
+msgs_by_name={ # debug only
+    MSG_ALIVE: 'ALIVE',
+    MGS_GOTO_SLICE_INFO: 'GOTO_SLICE_INFO',
+    MSG_TOGGLE_WINGS: 'TOGGLE_WINGS',
+    MSG_EXIT: 'EXIT',
+    MSG_GOTO_HOME: 'GOTO_HOME',
+    MSG_LIGHT: 'LIGHT',
+    MSG_DOUBLE_CLICK: 'DOUBLE_CLICK',
+    MSG_TRIPLE_CLICK: 'TRIPLE_CLICK',
+    MSG_TOGGLING_WINGS: 'TOGGLING_WINGS',
+}
 
 # Lights definition
 # ------------------------------------------------------------------------------------------------------------------------------------
@@ -129,6 +158,8 @@ LGT_UI_CONNECT_XBOX=const(12)
 LGT_WAIT_FOR_OTHER_SIDE=const(13)
 LGT_TOGGLE_STAY=const(14)
 LGT_TOGGLE_FOLLOW=const(15)
+LGT_OPEN_WINGS=const(16)
+LGT_CLOSE_WINGS=const(17)
 
 HLGT_ON=const(0)
 HLGT_BLINK=const(1)
@@ -151,6 +182,8 @@ hub_lights=(
     (HLGT_BLINK,   (Color.YELLOW*0.5, (300, 100))),          # 13
     (HLGT_ANIMATE, ((Color.BLUE, Color.YELLOW), 200)),       # 14
     (HLGT_ANIMATE, ((Color.BLUE, Color.CYAN*0.5), 200)),     # 15
+    (HLGT_BLINK,   (Color.GREEN, (150,150))),                # 16
+    (HLGT_BLINK,   (Color.ORANGE, (150,150))),               # 17
 )
 
 #------------------------------------------------------------------------------------------------------------------------------------
@@ -547,6 +580,8 @@ class InputHandler:
         self.button_mode=0 
         self.first_press_tick=None
         self.second_press_tick=None
+        self.follow_mode = None
+        self.last_change_light_tmp_click=None
 
     # --------------------------------------------------------------------------------
     def slices_info_to_lengths(self, slice_info):
@@ -570,7 +605,7 @@ class InputHandler:
         #    DOUBLE_CLICK_TIMEOUT - maximum time between two press events to be considered double click.
         #    LONG_CLICK_TIMEOUT - minimum time that the button must be pressed to be considered a long click.
         # Simple click is sent only when enough time has passed to exclude double click, that is, only DOUBLE_CLICK_TIMEOUT after the press action.
-        # Long click will start to blink hub light on orange after double_click_timeout.
+        # Long click will start to blink hub light on orange after DOUBLE_CLICK_TIMEOUT.
         # If a long click is interrupted, a simple click is returned.
         #
         # button_mode coding:
@@ -648,13 +683,39 @@ class InputHandler:
             return 0
         return 0
 
+    # --------------------------------------------------------------------------------
+    def handle_messages_from_other_hub(self, this_tick):
+        # Returns: 0 - exit; 1 - something done, continue; 2 - continue, nothing done
+        rec=xwg.comms.check_received()
+    
+        if not (rec is None or rec[0] == self.msg_counter): # Ignore already handled messages
+            self.msg_counter = rec[0]
+            if rec[1] == MSG_EXIT:
+                return 0 # Exit without reseting hub position
+
+            elif rec[1] == MSG_DOUBLE_CLICK:
+                self.follow_mode = not self.follow_mode
+                hub_light(LGT_TOGGLE_FOLLOW if self.follow_mode else LGT_TOGGLE_STAY, set_global=False)
+                self.last_change_light_tmp_click = this_tick
+                return 1
+
+            elif rec[1] == MSG_TRIPLE_CLICK:
+                self.set_ui_mode(this_tick)
+                self.last_change_light_tmp_click = this_tick
+                return 1
+
+        if self.last_change_light_tmp_click != None and this_tick - self.last_change_light_tmp_click > 2000:
+            self.last_change_light_tmp_click = None
+            hub_light(None)
+
+        return 2
+
 #------------------------------------------------------------------------------------------------------------------------------------
 class MotionHandler(InputHandler):
     # --------------------------------------------------------------------------------
     def __init__(self, n_slices, max_val):
         super().__init__()
         self.mode=0
-        self.last_change_light_tmp_click=None
         self.msg_counter =-1
 
         self.n_slices=n_slices
@@ -702,33 +763,6 @@ class MotionHandler(InputHandler):
             ui_mode_storage=UIM_FOLLOW 
             hub_light(LGT_UI_IMU_FOLLOW, set_global=False)
         xwg.hub.system.storage(4, write=ui_mode_storage)
-
-    # --------------------------------------------------------------------------------
-    def handle_messages_from_other_hub(self, this_tick):
-        # Returns: 0 - exit; 1 - something done, continue; 2 - continue, nothing done
-        rec=xwg.comms.check_received()
-    
-        if not (rec is None or rec[0] == self.msg_counter): # Ignore already handled messages
-            self.msg_counter = rec[0]
-            if rec[1] == MSG_EXIT:
-                return 0 # Exit without reseting hub position
-
-            elif rec[1] == MSG_DOUBLE_CLICK:
-                self.follow_mode = not self.follow_mode
-                hub_light(LGT_TOGGLE_FOLLOW if self.follow_mode else LGT_TOGGLE_STAY, set_global=False)
-                self.last_change_light_tmp_click = this_tick
-                return 1
-
-            elif rec[1] == MSG_TRIPLE_CLICK:
-                self.set_ui_mode(this_tick)
-                self.last_change_light_tmp_click = this_tick
-                return 1
-
-        if self.last_change_light_tmp_click != None and this_tick - self.last_change_light_tmp_click > 2000:
-            self.last_change_light_tmp_click = None
-            hub_light(None)
-
-        return 2
 
 #------------------------------------------------------------------------------------------------------------------------------------
 class IMUHandler(MotionHandler):
@@ -992,6 +1026,64 @@ class XboxHandler(MotionHandler):
             last_action_tick=self.this_tick
 
 #------------------------------------------------------------------------------------------------------------------------------------
+class FollowerHandler(InputHandler):
+    # Follows command from another platform
+
+    # --------------------------------------------------------------------------------
+    def __init__(self):
+        super().__init__()
+        self.rec_last_main_counter=None
+        self.rec_last_sec_counter=None
+        self.msg_counter =-1
+
+    # --------------------------------------------------------------------------------
+    async def loop(self):
+        hub_light(LGT_IMU_RP)
+        xwg.comms.do_send((MSG_LIGHT, LGT_IMU_RP))
+
+        last_action_tick=xwg.sw.time()
+
+        while True:
+            await wait(100)
+            self.this_tick= xwg.sw.time()
+
+            if self.this_tick - last_action_tick > IDLE_TIMEOUT:
+                break
+
+            #---------------------------------------------------------------------- Hub buttons
+            if self.check_green_button(self.this_tick) == 4: # Exit
+                return True # Exit reseting hub position
+
+            #---------------------------------------------------------------------- Command from another platform main hub
+            rec=xwg.hub.ble.observe(CHAN02)
+            if rec is not None and rec[0] !=-1 and rec[0] != self.rec_last_main_counter:
+                self.rec_last_main_counter=rec[0]
+
+                if rec[1] == MSG_EXIT:
+                    return True
+
+                if   rec[1] == MGS_GOTO_SLICE_INFO:
+                    light, slice_info=xwg.cmd_queue.slice_info_msg_values(rec[2:])
+                    xwg.cmd_queue.append(slice_info)
+                    last_action_tick=self.this_tick
+
+            #---------------------------------------------------------------------- Command from another platform secondary hub
+            rec=xwg.hub.ble.observe(CHAN01)
+            if rec is not None and rec[0] !=-1 and rec[0] != self.rec_last_sec_counter:
+                self.rec_last_sec_counter=rec[0]
+
+                if rec[1] == MSG_TOGGLING_WINGS:
+                    xwg.comms.do_send((MSG_TOGGLE_WINGS, rec[2]))
+                    last_action_tick=self.this_tick
+
+            #---------------------------------------------------------------------- Messages from center hub
+            r=self.handle_messages_from_other_hub(self.this_tick)
+            if r==0: # Exit no goto home
+                return False
+            elif r==1:
+                last_action_tick=self.this_tick
+
+#------------------------------------------------------------------------------------------------------------------------------------
 async def main_loop():
     if await xwg.motion.loop():
         hub_light(LGT_GOINGHOME)
@@ -1009,22 +1101,25 @@ async def main_task():
     
 #------------------------------------------------------------------------------------------------------------------------------------
 def main_main():
-    # Check mode
-    ui_mode_storage = xwg.hub.system.storage(4, read=3)
-    if ui_mode_storage == UIM_FOLLOW:
-        xwg.motion = IMUHandler(follow_mode=True)
-    elif ui_mode_storage == UIM_STAY:
-        xwg.motion = IMUHandler(follow_mode=False)
-    elif ui_mode_storage == UIM_XBOX:
-        # Force the storage to an unknown value so that if not able to connect to an XBox controller
-        # falls back into the default IMU. This because XboxController() has no timeout argument.
-        xwg.hub.system.storage(4, write=UIM_BOGUS) 
-        hub_light(LGT_UI_CONNECT_XBOX)
-        xwg.motion = XboxHandler()
-        xwg.hub.system.storage(4, write=UIM_XBOX) 
+    if CHAN02 == None:
+        # Check mode
+        ui_mode_storage = xwg.hub.system.storage(4, read=3)
+        if ui_mode_storage == UIM_FOLLOW:
+            xwg.motion = IMUHandler(follow_mode=True)
+        elif ui_mode_storage == UIM_STAY:
+            xwg.motion = IMUHandler(follow_mode=False)
+        elif ui_mode_storage == UIM_XBOX:
+            # Force the storage to an unknown value so that if not able to connect to an XBox controller
+            # falls back into the default IMU. This because XboxController() has no timeout argument.
+            xwg.hub.system.storage(4, write=UIM_BOGUS)
+            hub_light(LGT_UI_CONNECT_XBOX)
+            xwg.motion = XboxHandler()
+            xwg.hub.system.storage(4, write=UIM_XBOX)
+        else:
+            xwg.hub.system.storage(4, write=UIM_FOLLOW)
+            xwg.motion = IMUHandler(follow_mode=True)
     else:
-        xwg.hub.system.storage(4, write=UIM_FOLLOW)
-        xwg.motion = IMUHandler(follow_mode=True)
+        xwg.motion = FollowerHandler()
 
     hub_light(LGT_WAIT_FOR_OTHER_SIDE)
     if not xwg.comms.wait_other_side_alive():
@@ -1037,7 +1132,7 @@ def main_main():
     run_task(main_task())
 
 #------------------------------------------------------------------------------------------------------------------------------------
-def toggle_wings(this_tick, option):
+def toggle_wings(this_tick, option, do_send_msg=True):
     if not ((option == 'C' and xwg.xwmotor_direction == True)  or 
             (option == 'O' and xwg.xwmotor_direction == False) or 
              option in ('T', 'F')):
@@ -1048,6 +1143,10 @@ def toggle_wings(this_tick, option):
     xwg.xwmotor_init=this_tick
     xwg.xwmotor.run((1 if xwg.xwmotor_direction or option=='F' else -1)*1000)
     # False: opens, True: closes: which means: False closed, True: opened
+
+    # Send message so that follower platforms can do the same!:
+    if do_send_msg:
+        xwg.comms.do_send((MSG_TOGGLING_WINGS, 'C' if xwg.xwmotor_direction or option=='F' else 'O'))
     xwg.xwmotor_direction= not xwg.xwmotor_direction
 
 #------------------------------------------------------------------------------------------------------------------------------------
@@ -1115,7 +1214,7 @@ async def secondary_loop():
             last_action_tick=this_tick
 
         elif msg == MSG_EXIT:
-            toggle_wings(this_tick, 'F')
+            toggle_wings(this_tick, 'F', do_send_msg=False)
             hub_light(LGT_EXITING)
             await wait(XWING_MOTOR_TIMEOUT)
             break
@@ -1161,7 +1260,11 @@ except OSError as ex:
     I_AM_MAIN=True
 
 # Set globals
-xwg.hub = ThisHub(observe_channels=[OBSERVE_CH], broadcast_channel=BROADCAST_CH)
+observed=[OBSERVE_CH]
+if CHAN01 != None:
+    observed.append(CHAN01)
+    observed.append(CHAN02)
+xwg.hub = ThisHub(observe_channels=observed, broadcast_channel=BROADCAST_CH)
 xwg.hub.system.set_stop_button(None)
 xwg.sw=StopWatch()
 xwg.comms = CommunicationsHandler(i_am_main=I_AM_MAIN, observe_ch=OBSERVE_CH)
